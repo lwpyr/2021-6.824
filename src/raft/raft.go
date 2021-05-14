@@ -18,11 +18,12 @@ package raft
 //
 
 import (
-//	"bytes"
+	//	"bytes"
 	"sync"
 	"sync/atomic"
+	"time"
 
-//	"6.824/labgob"
+	//	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -65,6 +66,7 @@ const (
 )
 type RFLog struct {
 	LogType int
+	LogTerm int
 	Message ApplyMsg
 }
 type Raft struct {
@@ -97,6 +99,9 @@ type Raft struct {
 
 	// Interface
 	Inbox chan ApplyMsg
+
+	// time stamp
+	ElectionTimestamp time.Time
 }
 
 // return currentTerm and whether this server
@@ -201,6 +206,8 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
@@ -229,8 +236,39 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
-func (rf *Raft) AppendEntries(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.CurrentTerm {
+		reply.Term = rf.CurrentTerm
+		reply.Success = false
+		return
+	}
+	reply.Term = args.Term
+	if args.PrevLogIndex > rf.Cursor || args.PrevLogTerm != rf.Log[args.PrevLogIndex].LogTerm {
+		reply.Success = false
+		return
+	}
+	rf.Log = rf.Log[:args.PrevLogIndex + 1]
+	rf.Log = append(rf.Log, args.Entries...)
+	if rf.CommitIndex < args.LeaderCommit {
+		if rf.Cursor < args.LeaderCommit {
+			rf.CommitIndex = rf.Cursor
+		} else {
+			rf.CommitIndex = args.LeaderCommit
+		}
+	}
+	reply.Success = true
+}
 
+func (rf *Raft) HandleElectionTimeout() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+}
+
+func (rf *Raft) HandleHeartbeatTimeout() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 }
 
 //
@@ -318,10 +356,8 @@ func (rf *Raft) killed() bool {
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
+		rf.mu.Lock()
 
-		// Your code here to check if a leader election should
-		// be started and to randomize sleeping time using
-		// time.Sleep().
 
 	}
 }
@@ -350,6 +386,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.CurrentTerm = 0
 	rf.Log = []RFLog{{
 		LogType: DATA,
+		LogTerm: 0,
 		Message: ApplyMsg{
 			Command:       "Raft server start",
 		},
@@ -362,6 +399,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.NextIndex = map[int]int{}
 	rf.MatchedIndex = map[int]int{}
+
+	rf.ElectionTimestamp = time.Now()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
