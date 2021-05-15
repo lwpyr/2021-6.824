@@ -259,6 +259,7 @@ type AppendEntriesArgs struct {
 
 type AppendEntriesReply struct {
 	Term int
+	Cursor int
 	Success bool
 }
 
@@ -277,20 +278,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	if len(args.Entries) == 0 {
-		rf.Logf("receive heartbeat from %d", args.LeaderId)
+		rf.Logf("receive heartbeat from %d, %v", args.LeaderId, args)
 	} else {
 		rf.Logf("receive appendEntries from %d, %v", args.LeaderId, args)
 	}
 	rf.Log = rf.Log[:args.PrevLogIndex + 1]
 	rf.Log = append(rf.Log, args.Entries...)
-	rf.Cursor += len(args.Entries)
+	rf.Cursor = len(rf.Log) - 1
 	if rf.CommitIndex < args.LeaderCommit {
 		if rf.Cursor < args.LeaderCommit {
 			rf.CommitIndex = rf.Cursor
 		} else {
 			rf.CommitIndex = args.LeaderCommit
 		}
+		rf.Logf("follower update commitIdx %d", rf.CommitIndex)
 	}
+	reply.Cursor = rf.Cursor
 	reply.Success = true
 }
 
@@ -599,7 +602,7 @@ func (rf *Raft) SendHeartBeatToPeer(idx int, args AppendEntriesArgs) {
 	args.PrevLogIndex = rf.MatchedIndex[idx]
 	args.PrevLogTerm = rf.Log[rf.MatchedIndex[idx]].LogTerm
 	if rf.Cursor >= rf.NextIndex[idx] {
-		args.Entries = rf.Log[rf.NextIndex[idx]: rf.Cursor+1]
+		args.Entries = rf.Log[rf.NextIndex[idx]: rf.NextIndex[idx]+1]
 	}
 	var reply AppendEntriesReply
 	go func() {
@@ -608,11 +611,16 @@ func (rf *Raft) SendHeartBeatToPeer(idx int, args AppendEntriesArgs) {
 			defer rf.mu.Unlock()
 			rf.Logf("receive appendEntries response from %d, %v", idx, reply)
 			if reply.Success {
-				rf.MatchedIndex[idx] += len(args.Entries)
-				rf.NextIndex[idx] = rf.MatchedIndex[idx] + 1
-				rf.UpdateCommitIdx()
+				if reply.Cursor > rf.MatchedIndex[idx] {
+					rf.MatchedIndex[idx] = reply.Cursor
+					rf.NextIndex[idx] = rf.MatchedIndex[idx] + 1
+					rf.UpdateCommitIdx()
+				}
 			} else if reply.Term == args.Term {
 				rf.NextIndex[idx]--
+				if rf.NextIndex[idx] == 0 {
+					rf.NextIndex[idx] = 1
+				}
 			} else {
 				rf.resetFollower(reply.Term, -1)
 			}
@@ -633,6 +641,7 @@ func (rf *Raft) UpdateCommitIdx() {
 		return matches[i] > matches[j]
 	})
 	rf.CommitIndex = matches[len(rf.peers)/2]
+	rf.Logf("update commitIdx %d, from %v", rf.CommitIndex, rf.MatchedIndex)
 }
 
 func (rf *Raft) applyCron() {
