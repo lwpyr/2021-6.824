@@ -8,7 +8,9 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
@@ -240,7 +242,6 @@ func TestFailNoAgree2B(t *testing.T) {
 	if n > 0 {
 		t.Fatalf("%v committed but no majority", n)
 	}
-
 	// repair
 	cfg.connect((leader + 1) % servers)
 	cfg.connect((leader + 2) % servers)
