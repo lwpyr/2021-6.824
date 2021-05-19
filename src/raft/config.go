@@ -8,7 +8,9 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.824/labgob"
+import (
+	"6.824/labgob"
+)
 import "6.824/labrpc"
 import "bytes"
 import "log"
@@ -512,11 +514,17 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 			cfg.mu.Unlock()
 			if rf != nil {
+				rf.Lock()
+				log.Printf("[CONFIG] one(%v) on %d", cmd, si)
+				rf.Logf("In CONFIG")
+				rf.UnLock()
 				index1, _, ok := rf.Start(cmd)
 				if ok {
+					log.Printf("[CONFIG] one(%v) on %d ok", cmd, si)
 					index = index1
 					break
 				}
+				log.Printf("[CONFIG] one(%v) on %d fail", cmd, si)
 			}
 		}
 
