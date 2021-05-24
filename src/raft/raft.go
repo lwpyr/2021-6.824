@@ -223,7 +223,9 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.VotedFor = p.VotedFor
 	rf.Log = p.Log
 	rf.CompactedLen = p.CompactedLen
-	rf.LastApplied = p.IncludeIndex
+	if p.IncludeIndex != -1 {
+		rf.LastApplied = p.IncludeIndex
+	}
 	rf.IncludeIndex = p.IncludeIndex
 	rf.IncludeTerm = p.IncludeTerm
 	rf.SnapshotData = p.SnapshotData
@@ -238,6 +240,8 @@ func (rf *Raft) readPersist(data []byte) {
 //
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.CompactedLen > lastIncludedIndex + 1 {
 		return false
 	}
@@ -265,6 +269,8 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if index + 1 > rf.CompactedLen {
 		rf.IncludeTerm = rf.LogTermAt(index)
 		rf.IncludeIndex = index
@@ -273,29 +279,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.SnapshotData = snapshot
 	}
 	rf.Logf("snapshot %d completed, %d-%d", index, rf.IncludeIndex, rf.IncludeTerm)
-}
-
-
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
-type RequestVoteArgs struct {
-	// Your Data here (2A, 2B).
-	Term int
-	CandidateId int
-	LastLogIndex int
-	LastLogTerm int
-}
-
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
-type RequestVoteReply struct {
-	// Your Data here (2A).
-	Term int
-	VoteGranted bool
 }
 
 //
@@ -328,22 +311,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if reply.VoteGranted == false {
 		dec = "DENIED"
 	}
-	rf.Logf(dec + " vote request from peer[%d]", args.CandidateId)
-}
-
-type AppendEntriesArgs struct {
-	Term int
-	LeaderId int
-	PrevLogIndex int
-	PrevLogTerm int
-	Entries []RFLog
-	LeaderCommit int
-}
-
-type AppendEntriesReply struct {
-	Term int
-	Cursor int
-	Success bool
+	rf.Logf(dec + " vote request from peer[%d], %+v", args.CandidateId, args)
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -359,7 +327,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.resetFollower(args.Term)
 	if args.PrevLogIndex > rf.Cursor || args.PrevLogTerm != rf.LogTermAt(args.PrevLogIndex) {
 		reply.Success = false
-		reply.Cursor = rf.Cursor
 		return
 	}
 	if len(args.Entries) == 0 {
@@ -392,22 +359,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.applyToCommit()
 		rf.Logf("follower update commitIdx %d", rf.CommitIndex)
 	}
-	reply.Cursor = args.PrevLogIndex + len(args.Entries)
 	reply.Success = true
-}
-
-
-type InstallSnapshotArgs struct {
-	// Your data here (2A, 2B).
-	Term             int
-	LeaderId         int
-	LastIncludeIndex int
-	LastIncludeTerm  int
-	Data             []byte
-}
-
-type InstallSnapshotReply struct {
-	Term int
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
@@ -483,7 +435,7 @@ func (rf *Raft) startElection() {
 			}
 			rf.mu.Unlock()
 			reply := RequestVoteReply{}
-			if rf.sendRequestVote(idx, &args, &reply) {
+			if rf.SyncRequestVote(idx, &args, &reply) {
 				rf.ReceiveVote(idx, &args, &reply)
 			}
 		}()
@@ -550,36 +502,6 @@ func (rf *Raft) resetFollower(term int) {
 	}
 	rf.ElectionTimestamp = time.Now()
 	rf.Logf("reset as follower")
-}
-
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	rf.mu.Lock()
-	rf.Logf("send vote request to %d, current vote count %d", server, rf.VoteCount)
-	rf.mu.Unlock()
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
-
-func (rf *Raft) AsyncAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, c chan struct{}) {
-	rf.mu.Lock()
-	if len(args.Entries) == 0 {
-		rf.Logf("send heartbeat to peer[%d], %+v", server, *args)
-	} else {
-		rf.Logf("appendEntry to peer[%d], length %d", server, len(args.Entries))
-	}
-	rf.mu.Unlock()
-	if rf.peers[server].Call("Raft.AppendEntries", args, reply) {
-		c <- struct{}{}
-	}
-}
-
-func (rf *Raft) AsyncInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply, c chan struct{}) {
-	rf.mu.Lock()
-	rf.Logf("send snap to peer[%d]", server)
-	rf.mu.Unlock()
-	if rf.peers[server].Call("Raft.InstallSnapshot", args, reply) {
-		c <- struct{}{}
-	}
 }
 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -731,13 +653,17 @@ func (rf *Raft) ReceiveAppendResponse(idx int, args *AppendEntriesArgs, reply *A
 		return
 	}
 	if reply.Success {
-		if reply.Cursor > rf.MatchedIndex[idx] {
-			rf.MatchedIndex[idx] = reply.Cursor
+		followerCursor := args.PrevLogIndex + len(args.Entries)
+		if followerCursor > rf.MatchedIndex[idx] {
+			rf.MatchedIndex[idx] = followerCursor
 			rf.NextIndex[idx] = rf.MatchedIndex[idx] + 1
 			rf.UpdateCommitIdx()
 		}
 	} else {
-		rf.NextIndex[idx] = reply.Cursor + 1
+		rf.NextIndex[idx] -= 50
+		if rf.NextIndex[idx] < 1 {
+			rf.NextIndex[idx] = 1
+		}
 	}
 }
 
@@ -750,7 +676,7 @@ func (rf *Raft) UpdateCommitIdx() {
 		return matches[i] > matches[j]
 	})
 	temp := matches[len(rf.peers)/2]
-	if temp > rf.CommitIndex {
+	if temp > rf.CommitIndex && rf.LogTermAt(temp) == rf.CurrentTerm{
 		rf.CommitIndex = temp
 		rf.applyToCommit()
 		rf.Logf("update commitIdx %d, from %+v", rf.CommitIndex, rf.MatchedIndex)
@@ -763,6 +689,7 @@ func (rf *Raft) applyToCommit() {
 	}
 	for rf.LastApplied < rf.CommitIndex {
 		if rf.LastApplied == rf.IncludeIndex {
+			rf.mu.Unlock()
 			rf.ApplyChan <- ApplyMsg{
 				CommandValid:  false,
 				SnapshotValid: true,
@@ -770,10 +697,14 @@ func (rf *Raft) applyToCommit() {
 				SnapshotTerm:  rf.IncludeTerm,
 				SnapshotIndex: rf.IncludeIndex,
 			}
+			rf.mu.Lock()
 		}
 		rf.LastApplied++
 		rf.Logf("apply message %+v", rf.LogAt(rf.LastApplied).Message)
-		rf.ApplyChan <- rf.LogAt(rf.LastApplied).Message
+		log := rf.LogAt(rf.LastApplied)
+		rf.mu.Unlock()
+		rf.ApplyChan <- log.Message
+		rf.mu.Lock()
 	}
 }
 
