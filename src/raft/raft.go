@@ -136,6 +136,10 @@ func (rf *Raft) LogAt(idx int) *RFLog {
 	return &rf.Log[idx - rf.CompactedLen]
 }
 
+func (rf *Raft) LogIsCompacted(idx int) bool {
+	return idx - rf.CompactedLen < 0
+}
+
 func (rf *Raft) LogTermAt(idx int) int {
 	if idx == rf.IncludeIndex {
 		return rf.IncludeTerm
@@ -231,9 +235,6 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.VotedFor = p.VotedFor
 	rf.Log = p.Log
 	rf.CompactedLen = p.CompactedLen
-	if p.IncludeIndex != -1 {
-		rf.LastApplied = p.IncludeIndex
-	}
 	rf.IncludeIndex = p.IncludeIndex
 	rf.IncludeTerm = p.IncludeTerm
 	rf.SnapshotData = p.SnapshotData
@@ -253,22 +254,20 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	if rf.CompactedLen > lastIncludedIndex + 1 {
 		return false
 	}
+	rf.CompactedLen = lastIncludedIndex + 1
+	rf.SnapshotData = snapshot
 
 	if lastIncludedIndex <= rf.LastApplied && lastIncludedTerm == rf.LogTermAt(lastIncludedIndex) {
 		rf.Log = rf.LogRange0(lastIncludedIndex+1)
-		rf.CompactedLen = lastIncludedIndex + 1
-		rf.Logf("agree to receive conditional install snapshot")
 	} else {
-		rf.Log = rf.Log[:0]
-		rf.CompactedLen = lastIncludedIndex + 1
-		rf.SnapshotData = snapshot
+		rf.Log = []RFLog{}
 		rf.IncludeIndex = lastIncludedIndex
 		rf.IncludeTerm = lastIncludedTerm
 		rf.Cursor = lastIncludedIndex
 		rf.CommitIndex = lastIncludedIndex
 		rf.LastApplied = lastIncludedIndex
-		rf.Logf("refuse to receive conditional install snapshot")
 	}
+	rf.Logf("agree to receive conditional install snapshot")
 	return true
 }
 
@@ -286,6 +285,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.CompactedLen = index + 1
 		rf.SnapshotData = snapshot
 	}
+	rf.persist()
 	rf.Logf("snapshot %d completed, %d-%d", index, rf.IncludeIndex, rf.IncludeTerm)
 }
 
@@ -333,7 +333,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Term = args.Term
 	rf.resetFollower(args.Term)
-	if args.PrevLogIndex > rf.Cursor || args.PrevLogTerm != rf.LogTermAt(args.PrevLogIndex) {
+	rf.Logf("debug %+v", args)
+	if args.PrevLogIndex > rf.Cursor ||
+		!rf.LogIsCompacted(args.PrevLogIndex) && args.PrevLogTerm != rf.LogTermAt(args.PrevLogIndex) {
 		reply.Success = false
 		return
 	}
@@ -343,19 +345,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.Logf("receive appendEntries from %d, length %d", args.LeaderId, len(args.Entries))
 	}
 	update := false
-	if args.PrevLogIndex + len(args.Entries) > rf.Cursor {
-		update = true
-	} else {
-		for idx, log := range args.Entries {
-			if log.LogTerm != rf.LogTermAt(args.PrevLogIndex + idx + 1) {
-				update = true
-				break
-			}
+	updateIdx := 0
+
+	for idx, log := range args.Entries {
+		logIdx := args.PrevLogIndex + idx + 1
+		if !rf.LogIsCompacted(logIdx) && log.LogTerm != rf.LogTermAt(logIdx) {
+			update = true
+			updateIdx = idx
+			break
 		}
 	}
+
 	if update {
-		rf.Log = rf.LogRange2(args.PrevLogIndex+1)
-		rf.Log = append(rf.Log, args.Entries...)
+		rf.Logf("%d %d", args.PrevLogIndex + updateIdx + 1, rf.CompactedLen)
+		rf.Log = rf.LogRange2(args.PrevLogIndex + updateIdx + 1)
+		rf.Log = append(rf.Log, args.Entries[updateIdx:]...)
 		rf.Cursor = rf.LogLen() - 1
 	}
 	if rf.CommitIndex < args.LeaderCommit {
@@ -364,7 +368,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.CommitIndex = args.LeaderCommit
 		}
-		rf.applyToCommit()
+		rf.ApplyToCommit()
 		rf.Logf("follower update commitIdx %d", rf.CommitIndex)
 	}
 	reply.Success = true
@@ -379,7 +383,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	rf.resetFollower(args.Term)
 	reply.Term = args.Term
-	if args.LastIncludeIndex <= rf.LastApplied && args.LastIncludeTerm == rf.LogTermAt(args.LastIncludeIndex) {
+	if rf.LogIsCompacted(args.LastIncludeIndex) {
+		rf.Logf("stale snapshot[index-%d, term-%d]", args.LastIncludeIndex, args.LastIncludeTerm)
+	} else if args.LastIncludeIndex <= rf.LastApplied && args.LastIncludeTerm == rf.LogTermAt(args.LastIncludeIndex) {
 		rf.Log = rf.LogRange0(args.LastIncludeIndex+1)
 		rf.CompactedLen = args.LastIncludeIndex + 1
 		rf.Logf("snapshot[index-%d, term-%d], trim log", args.LastIncludeIndex, args.LastIncludeTerm)
@@ -607,7 +613,7 @@ func (rf *Raft) SendHeartBeatsToPeer(idx int) {
 				PrevLogTerm:  rf.LogTermAt(rf.NextIndex[idx] - 1),
 			}
 			if rf.Cursor >= rf.NextIndex[idx] {
-				args.Entries = rf.LogRange0(rf.NextIndex[idx])
+				args.Entries = append(args.Entries, rf.LogRange0(rf.NextIndex[idx])...)
 			}
 			rf.mu.Unlock()
 			var reply AppendEntriesReply
@@ -622,7 +628,7 @@ func (rf *Raft) SendHeartBeatsToPeer(idx int) {
 				rf.mu.Unlock()
 			case <-c:
 				rf.ReceiveAppendResponse(idx, &args, &reply)
-				randomTime := time.Duration(rand.Int()%25+25) * time.Millisecond
+				randomTime := 20 * time.Millisecond
 				time.Sleep(randomTime)
 			}
 		}
@@ -686,33 +692,37 @@ func (rf *Raft) UpdateCommitIdx() {
 	temp := matches[len(rf.peers)/2]
 	if temp > rf.CommitIndex && rf.LogTermAt(temp) == rf.CurrentTerm{
 		rf.CommitIndex = temp
-		rf.applyToCommit()
+		rf.ApplyToCommit()
 		rf.Logf("update commitIdx %d, from %+v", rf.CommitIndex, rf.MatchedIndex)
 	}
 }
 
-func (rf *Raft) applyToCommit() {
+func (rf *Raft) ApplyToCommit() {
 	if rf.CommitIndex > rf.Cursor || rf.LastApplied > rf.CommitIndex{
 		panic("range error")
 	}
 	for rf.LastApplied < rf.CommitIndex {
-		if rf.LastApplied == rf.IncludeIndex {
-			rf.mu.Unlock()
-			rf.ApplyChan <- ApplyMsg{
+		if rf.LastApplied <= rf.IncludeIndex {
+			msg := ApplyMsg{
 				CommandValid:  false,
 				SnapshotValid: true,
 				Snapshot:      rf.SnapshotData,
 				SnapshotTerm:  rf.IncludeTerm,
 				SnapshotIndex: rf.IncludeIndex,
 			}
+			rf.LastApplied = rf.IncludeIndex
+			rf.mu.Unlock()
+			rf.ApplyChan <- msg
 			rf.mu.Lock()
 		}
-		rf.LastApplied++
-		rf.Logf("apply message %+v", rf.LogAt(rf.LastApplied).Message)
-		log := rf.LogAt(rf.LastApplied)
-		rf.mu.Unlock()
-		rf.ApplyChan <- log.Message
-		rf.mu.Lock()
+		if rf.LastApplied < rf.CommitIndex {
+			rf.LastApplied++
+			rf.Logf("apply message %+v", rf.LogAt(rf.LastApplied).Message)
+			log := rf.LogAt(rf.LastApplied)
+			rf.mu.Unlock()
+			rf.ApplyChan <- log.Message
+			rf.mu.Lock()
+		}
 	}
 }
 
@@ -781,6 +791,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.ApplyToCommit()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

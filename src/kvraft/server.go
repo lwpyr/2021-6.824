@@ -4,8 +4,10 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"bytes"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,9 +34,32 @@ type KVServer struct {
 	// Your definitions here.
 	kv map[string]string
 	clients map[int]int32
+	clientsLock sync.Mutex
 
 	notifier map[int]chan OpRes
+	persister *raft.Persister
 	notifierLock sync.Mutex
+}
+
+func (kv *KVServer) SetClients(k int, v int32) {
+	kv.clientsLock.Lock()
+	defer kv.clientsLock.Unlock()
+
+	kv.clients[k] = v
+}
+
+func (kv *KVServer) CheckClients(k int) (v int32, ok bool) {
+	kv.clientsLock.Lock()
+	defer kv.clientsLock.Unlock()
+	v, ok = kv.clients[k]
+	return
+}
+
+func (kv *KVServer) DeleteClients(k int) {
+	kv.clientsLock.Lock()
+	defer kv.clientsLock.Unlock()
+
+	delete(kv.clients, k)
 }
 
 func (kv *KVServer) SetNotifier(t int, c chan OpRes) {
@@ -107,10 +132,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	defer kv.mu.Unlock()
 	defer kv.DeleteNotifier(t)
 
-	if val, ok := kv.clients[args.ClientID]; ok && val >= args.SerialID {
-		reply.Err = OK
-		return
-	}
+	//if val, ok := kv.clients[args.ClientID]; ok && val >= args.SerialID {
+	//	reply.Err = OK
+	//	return
+	//}
 
 	rec := Op{
 		Cmd:       *args,
@@ -132,11 +157,41 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 }
 
+type KVServerSnapshot struct {
+	Kv      map[string]string `json:"kv"`
+	Clients map[int]int32     `json:"clients"`
+}
+
+func (kv *KVServer) CheckPersist(appliedIndex int) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	snapshot := KVServerSnapshot{
+		Kv:     kv.kv,
+		Clients: kv.clients,
+	}
+	err := e.Encode(snapshot)
+	if err != nil {
+		return
+	}
+	b := w.Bytes()
+	if kv.persister.RaftStateSize() >= kv.maxraftstate {
+		kv.rf.Snapshot(appliedIndex, b)
+	}
+}
+
 func (kv *KVServer) ApplyCron() {
 	for m := range kv.applyCh {
-		if m.CommandValid == false {
+		if m.SnapshotValid == true {
+			var s KVServerSnapshot
+			r := bytes.NewBuffer(m.Snapshot)
+			d := labgob.NewDecoder(r)
+			if d.Decode(&s) != nil {
+				os.Exit(1)
+			}
+			kv.kv = s.Kv
+			kv.clients = s.Clients
 			// ignore other types of ApplyMsg
-		} else {
+		} else if m.CommandValid == true {
 			op := m.Command.(Op)
 			var res OpRes
 			switch op.Cmd.(type) {
@@ -168,6 +223,7 @@ func (kv *KVServer) ApplyCron() {
 			if notifier, ok := kv.CheckNotifier(op.Timestamp); ok {
 				notifier <- res
 			}
+			kv.CheckPersist(m.CommandIndex)
 		}
 	}
 }
@@ -226,12 +282,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.persister = persister
 	kv.kv = make(map[string]string)
 	kv.clients = make(map[int]int32)
 	kv.notifier = make(map[int]chan OpRes)
 	go kv.ApplyCron()
 
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	// You may need initialization code here.
 
 	return kv
