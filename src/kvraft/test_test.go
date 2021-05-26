@@ -1,6 +1,8 @@
 package kvraft
 
-import "6.824/porcupine"
+import (
+	"6.824/porcupine"
+)
 import "6.824/models"
 import "testing"
 import "strconv"
@@ -162,7 +164,7 @@ func checkConcurrentAppends(t *testing.T, v string, counts []int) {
 			}
 			off1 := strings.LastIndex(v, wanted)
 			if off1 != off {
-				t.Fatalf("duplicate element %v in Append result", wanted)
+				t.Fatalf("duplicate element %v in Append result, get %v", wanted, v)
 			}
 			if off <= lastoff {
 				t.Fatalf("wrong order for element %v in Append result", wanted)

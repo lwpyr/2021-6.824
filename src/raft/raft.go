@@ -120,6 +120,14 @@ type Raft struct {
 	IncludeTerm  int
 }
 
+func (rf *Raft) Lock() {
+	rf.mu.Lock()
+}
+
+func (rf *Raft) UnLock() {
+	rf.mu.Unlock()
+}
+
 func (rf *Raft) LogLen() int {
 	return len(rf.Log) + rf.CompactedLen
 }
@@ -501,7 +509,7 @@ func (rf *Raft) resetFollower(term int) {
 		rf.VotedFor = -1
 	}
 	rf.ElectionTimestamp = time.Now()
-	rf.Logf("reset as follower")
+	//rf.Logf("reset as follower")
 }
 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -579,7 +587,7 @@ func (rf *Raft) SendHeartBeatsToPeer(idx int) {
 			c := make(chan struct{}, 1)
 			go rf.AsyncInstallSnapshot(idx, &args, &reply, c)
 			select {
-			case <-time.NewTimer(50 * time.Millisecond).C:
+			case <-time.NewTimer(20 * time.Millisecond).C:
 				rf.mu.Lock()
 				if rf.State == LEADER || rf.CurrentTerm == args.Term {
 					rf.Logf("failed to receive appendEntries response from %d", idx)
@@ -587,7 +595,7 @@ func (rf *Raft) SendHeartBeatsToPeer(idx int) {
 				rf.mu.Unlock()
 			case <-c:
 				rf.ReceiveInstallSnapshotResponse(idx, &args, &reply)
-				randomTime := time.Duration(rand.Int()%25+25) * time.Millisecond
+				randomTime := 20 * time.Millisecond
 				time.Sleep(randomTime)
 			}
 		} else {

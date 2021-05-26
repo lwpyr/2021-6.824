@@ -4,9 +4,11 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -16,13 +18,6 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 		log.Printf(format, a...)
 	}
 	return
-}
-
-
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
 }
 
 type KVServer struct {
@@ -35,15 +30,146 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	kv map[string]string
+	clients map[int]int32
+
+	notifier map[int]chan OpRes
+	notifierLock sync.Mutex
 }
 
+func (kv *KVServer) SetNotifier(t int, c chan OpRes) {
+	kv.notifierLock.Lock()
+	defer kv.notifierLock.Unlock()
+
+	kv.notifier[t] = c
+}
+
+func (kv *KVServer) CheckNotifier(t int) (c chan OpRes, ok bool) {
+	kv.notifierLock.Lock()
+	defer kv.notifierLock.Unlock()
+	c, ok = kv.notifier[t]
+	return
+}
+
+func (kv *KVServer) DeleteNotifier(t int) {
+	kv.notifierLock.Lock()
+	defer kv.notifierLock.Unlock()
+
+	delete(kv.notifier, t)
+}
+
+type Op struct {
+	Cmd       interface{}
+	Timestamp int
+}
+
+type OpRes struct {
+	Err Err
+	Value string
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	kv.mu.Lock()
+	ts := time.Now()
+	t := ts.Nanosecond()
+	c := make(chan OpRes, 1)
+	kv.SetNotifier(t, c)
+	defer kv.mu.Unlock()
+	defer kv.DeleteNotifier(t)
+
+	rec := Op{
+		Cmd:       *args,
+		Timestamp: t,
+	}
+	_, _, ok := kv.rf.Start(rec)
+	if ok {
+		select {
+		case res := <- c:
+			reply.Err = res.Err
+			reply.Value = res.Value
+			kv.Logf("Receive Get %+v, reply %+v", args, reply)
+		case <- time.NewTimer(100 * time.Millisecond).C:
+			reply.Err = ErrWrongLeader
+		}
+	} else {
+		reply.Err = ErrWrongLeader
+	}
 	// Your code here.
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	kv.mu.Lock()
+	kv.Logf("Receive Put %+v from Client[%d]", args, args.ClientID)
+	ts := time.Now()
+	t := ts.Nanosecond()
+	c := make(chan OpRes, 1)
+	kv.SetNotifier(t, c)
+	defer kv.mu.Unlock()
+	defer kv.DeleteNotifier(t)
+
+	if val, ok := kv.clients[args.ClientID]; ok && val >= args.SerialID {
+		reply.Err = OK
+		return
+	}
+
+	rec := Op{
+		Cmd:       *args,
+		Timestamp: t,
+	}
+
+	_, _, ok := kv.rf.Start(rec)
+	if ok {
+		select {
+		case res := <- c:
+			reply.Err = res.Err
+			kv.Logf("Server Put %+v, commit value %s take %v ms, reply %+v", args, kv.kv[args.Key], time.Since(ts).Milliseconds(), reply)
+		case <- time.NewTimer(100 * time.Millisecond).C:
+			reply.Err = ErrWrongLeader
+		}
+	} else {
+		reply.Err = ErrWrongLeader
+	}
 	// Your code here.
+}
+
+func (kv *KVServer) ApplyCron() {
+	for m := range kv.applyCh {
+		if m.CommandValid == false {
+			// ignore other types of ApplyMsg
+		} else {
+			op := m.Command.(Op)
+			var res OpRes
+			switch op.Cmd.(type) {
+			case GetArgs:
+				cmd := op.Cmd.(GetArgs)
+				val, ok := kv.kv[cmd.Key]
+				if ok {
+					res.Err = OK
+					res.Value = val
+				} else {
+					res.Err = ErrNoKey
+				}
+			case PutAppendArgs:
+				cmd := op.Cmd.(PutAppendArgs)
+				kv.Logf("Execute %+v", cmd)
+				if cmd.Op == "Put" {
+					kv.kv[cmd.Key] = cmd.Value
+				} else if val, ok := kv.clients[cmd.ClientID]; !ok || val < cmd.SerialID {
+					val, ok := kv.kv[cmd.Key]
+					if ok {
+						kv.kv[cmd.Key] = val + cmd.Value
+					} else {
+						kv.kv[cmd.Key] = cmd.Value
+					}
+				}
+				res.Err = OK
+				kv.clients[cmd.ClientID] = cmd.SerialID
+			}
+			if notifier, ok := kv.CheckNotifier(op.Timestamp); ok {
+				notifier <- res
+			}
+		}
+	}
 }
 
 //
@@ -67,6 +193,11 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
+func (kv *KVServer) Logf(format string, a ...interface{}) {
+	prefix := fmt.Sprintf("[%d]KVRAFT: ", kv.me)
+	_, _ = DPrintf(prefix+format+"\n", a...)
+}
+
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -85,6 +216,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(PutAppendArgs{})
+	labgob.Register(GetArgs{})
 
 	kv := new(KVServer)
 	kv.me = me
@@ -94,6 +227,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.kv = make(map[string]string)
+	kv.clients = make(map[int]int32)
+	kv.notifier = make(map[int]chan OpRes)
+	go kv.ApplyCron()
 
 	// You may need initialization code here.
 
