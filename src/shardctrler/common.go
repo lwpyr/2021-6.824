@@ -1,5 +1,7 @@
 package shardctrler
 
+import "sort"
+
 //
 // Shard controler: assigns shards to replication groups.
 //
@@ -28,13 +30,50 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func (c *Config) Balance() {
+	var gids []int
+	for k,_ := range c.Groups {
+		gids = append(gids, k)
+	}
+	if len(gids) == 0 {
+		for i := 0; i < NShards; i++ {
+			c.Shards[i] = 0
+		}
+	} else {
+		sort.Slice(gids, func(i int, j int) bool {
+			return gids[i] < gids[j]
+		})
+		for i := 0; i < NShards; i++ {
+			c.Shards[i] = gids[i%len(gids)]
+		}
+	}
+}
+
+func (c *Config) Copy() *Config {
+	conf := Config{
+		Num:    c.Num,
+		Shards: [NShards]int{},
+		Groups: map[int][]string{},
+	}
+	for idx, gid := range c.Shards {
+		conf.Shards[idx] = gid
+	}
+	for k,v := range c.Groups {
+		conf.Groups[k] = v
+	}
+	return &conf
+}
+
 const (
 	OK = "OK"
+	ERR = "ERR"
 )
 
 type Err string
 
 type JoinArgs struct {
+	ClientID int
+	SerialID int
 	Servers map[int][]string // new GID -> servers mappings
 }
 
@@ -44,6 +83,8 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
+	ClientID int
+	SerialID int
 	GIDs []int
 }
 
@@ -53,6 +94,8 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
+	ClientID int
+	SerialID int
 	Shard int
 	GID   int
 }

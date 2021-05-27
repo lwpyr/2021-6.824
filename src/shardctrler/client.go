@@ -4,21 +4,43 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import "6.824/labrpc"
+import (
+	"6.824/labrpc"
+	"fmt"
+	"log"
+	"sync"
+)
 import "time"
-import "crypto/rand"
-import "math/big"
+
+var GlobalId = 0
+var GlobalIdMu sync.Mutex
+
+func AcquireClientId() int {
+	GlobalIdMu.Lock()
+	defer GlobalIdMu.Unlock()
+	ret := GlobalId
+	GlobalId++
+	return ret
+}
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	SerID int
+	ClientID int
+	mu sync.Mutex
 }
 
-func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
-	return x
+func (ck* Clerk) NextSerID() int {
+	ck.SerID++
+	return ck.SerID
+}
+
+func (ck *Clerk) Logf(format string, a ...interface{}) {
+	if Debug {
+		prefix := fmt.Sprintf("[%d]MGR_CLIENT: ", ck.ClientID)
+		log.Printf(prefix+format, a...)
+	}
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
@@ -29,6 +51,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 func (ck *Clerk) Query(num int) Config {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	ck.Logf("Query %d", num)
 	args := &QueryArgs{}
 	// Your code here.
 	args.Num = num
@@ -46,7 +71,13 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	ck.Logf("Join %+v", servers)
+	args := &JoinArgs{
+		ClientID: ck.ClientID,
+		SerialID: ck.NextSerID(),
+	}
 	// Your code here.
 	args.Servers = servers
 
@@ -64,7 +95,13 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	ck.Logf("Leave %+v", gids)
+	args := &LeaveArgs{
+		ClientID: ck.ClientID,
+		SerialID: ck.NextSerID(),
+	}
 	// Your code here.
 	args.GIDs = gids
 
@@ -82,7 +119,13 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	ck.Logf("Move shard[%d] -> GID[%d]", shard, gid)
+	args := &MoveArgs{
+		ClientID: ck.ClientID,
+		SerialID: ck.NextSerID(),
+	}
 	// Your code here.
 	args.Shard = shard
 	args.GID = gid
