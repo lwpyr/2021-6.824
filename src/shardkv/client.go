@@ -8,11 +8,25 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "6.824/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"6.824/labrpc"
+	"fmt"
+	"log"
+	"sync"
+)
 import "6.824/shardctrler"
 import "time"
+
+var GlobalId = 0
+var GlobalIdMu sync.Mutex
+
+func AcquireClientId() int {
+	GlobalIdMu.Lock()
+	defer GlobalIdMu.Unlock()
+	ret := GlobalId
+	GlobalId++
+	return ret
+}
 
 //
 // which shard is a key in?
@@ -28,18 +42,26 @@ func key2shard(key string) int {
 	return shard
 }
 
-func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
-	return x
-}
-
 type Clerk struct {
 	sm       *shardctrler.Clerk
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	SerID int
+	ClientID int
+	mu sync.Mutex
+}
+
+func (ck* Clerk) NextSerID() int {
+	ck.SerID++
+	return ck.SerID
+}
+
+func (ck *Clerk) Logf(format string, a ...interface{}) {
+	if Debug {
+		prefix := fmt.Sprintf("[%d]MGR_CLIENT: ", ck.ClientID)
+		log.Printf(prefix+format, a...)
+	}
 }
 
 //
@@ -56,6 +78,7 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.ClientID = AcquireClientId()
 	return ck
 }
 

@@ -11,9 +11,10 @@ import "sync"
 import "6.824/labgob"
 
 const (
-	STABLE = iota
+	FRESH = iota
 	PREPARE
-	EXECUTING
+	CHANGING
+	RUNNING
 )
 
 type ShardCtrler struct {
@@ -23,7 +24,7 @@ type ShardCtrler struct {
 	applyCh chan raft.ApplyMsg
 
 	// Your data here.
-	State int // STABLE -(client cmd)-> PREPARE -(all RGs ACK)-> EXECUTING -(all RGs ACK/RPC complete)-> STABLE
+	configStates[] int // FRESH -> PREPARE -> CHANGING -> RUNNING
 
 	configs []Config // indexed by config num
 	clients map[int]int // at most once
@@ -44,14 +45,14 @@ type OpRes struct {
 }
 
 func (sc *ShardCtrler) Logf(format string, a ...interface{}) {
-	prefix := fmt.Sprintf("[%d]MGR(version-%d): ", sc.me, len(sc.configs)-1)
+	prefix := fmt.Sprintf("[%d]MGR: ", sc.me)
 	_, _ = DPrintf(prefix+format+"\n", a...)
 }
 
 func (sc *ShardCtrler) LockLogf(format string, a ...interface{}) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	prefix := fmt.Sprintf("[%d]MGR(version-%d): ", sc.me, len(sc.configs)-1)
+	prefix := fmt.Sprintf("[%d]MGR: ", sc.me)
 	_, _ = DPrintf(prefix+format+"\n", a...)
 }
 
@@ -163,6 +164,7 @@ func (sc *ShardCtrler) ApplyCron() {
 					}
 					conf.Balance()
 					sc.configs = append(sc.configs, *conf)
+					sc.configStates = append(sc.configStates, FRESH)
 				}
 			case LeaveArgs:
 				leave := op.Cmd.(LeaveArgs)
@@ -174,6 +176,7 @@ func (sc *ShardCtrler) ApplyCron() {
 					}
 					conf.Balance()
 					sc.configs = append(sc.configs, *conf)
+					sc.configStates = append(sc.configStates, FRESH)
 				}
 			case MoveArgs:
 				move := op.Cmd.(MoveArgs)
@@ -182,6 +185,7 @@ func (sc *ShardCtrler) ApplyCron() {
 					conf.Num += 1
 					conf.Shards[move.Shard] = move.GID
 					sc.configs = append(sc.configs, *conf)
+					sc.configStates = append(sc.configStates, FRESH)
 				}
 			case QueryArgs:
 				query := op.Cmd.(QueryArgs)

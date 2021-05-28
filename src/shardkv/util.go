@@ -1,9 +1,9 @@
-package shardctrler
+package shardkv
 
 import "log"
 
 // Debugging
-const Debug = false
+const Debug = true
 
 func init(){
 	log.SetFlags(log.Lmicroseconds)

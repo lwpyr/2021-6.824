@@ -1,7 +1,10 @@
 package shardkv
 
 
-import "6.824/labrpc"
+import (
+	"6.824/labrpc"
+	"6.824/shardctrler"
+)
 import "6.824/raft"
 import "sync"
 import "6.824/labgob"
@@ -25,6 +28,8 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	sm       	 *shardctrler.Clerk
+	ctrlConfig   shardctrler.Config
 }
 
 
@@ -95,7 +100,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
+	kv.sm = shardctrler.MakeClerk(ctrlers)
 
 	return kv
 }

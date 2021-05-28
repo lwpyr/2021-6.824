@@ -242,8 +242,7 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.Logf("read persist success")
 }
 
-
-//
+// CondInstallSnapshot
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 //
@@ -271,6 +270,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	return true
 }
 
+// Snapshot
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -289,9 +289,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.Logf("snapshot %d completed, %d-%d", index, rf.IncludeIndex, rf.IncludeTerm)
 }
 
-//
-// example RequestVote RPC handler.
-//
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
@@ -333,7 +330,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Term = args.Term
 	rf.resetFollower(args.Term)
-	rf.Logf("debug %+v", args)
 	if args.PrevLogIndex > rf.Cursor ||
 		!rf.LogIsCompacted(args.PrevLogIndex) && args.PrevLogTerm != rf.LogTermAt(args.PrevLogIndex) {
 		reply.Success = false
@@ -520,8 +516,6 @@ func (rf *Raft) resetFollower(term int) {
 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	defer rf.persist()
 	index := -1
 	term := -1
 	isLeader := rf.State == LEADER
@@ -541,6 +535,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 				CommandIndex:  rf.Cursor,
 			},
 		})
+		rf.persist()
+		rf.syncAll()
+		rf.mu.Unlock()
+	} else {
+		rf.mu.Unlock()
 	}
 
 	return index, term, isLeader
@@ -557,7 +556,7 @@ func (rf *Raft) killed() bool {
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
-// heartsbeats recently.
+// heartbeats recently.
 func (rf *Raft) ticker() {
 	rf.mu.Lock()
 	rf.Logf("start ticker")
@@ -573,65 +572,78 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) syncAll() {
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go rf.sync(i)
+	}
+}
+
+func (rf *Raft) sync(idx int) bool {
+	rf.mu.Lock()
+	if rf.State != LEADER {
+		rf.mu.Unlock()
+		return false
+	}
+	if rf.NextIndex[idx] < rf.CompactedLen {
+		args := InstallSnapshotArgs{
+			Term:             rf.CurrentTerm,
+			LeaderId:         rf.me,
+			LastIncludeIndex: rf.IncludeIndex,
+			LastIncludeTerm:  rf.IncludeTerm,
+			Data:             rf.SnapshotData,
+		}
+		rf.mu.Unlock()
+		var reply InstallSnapshotReply
+		c := make(chan struct{}, 1)
+		go rf.AsyncInstallSnapshot(idx, &args, &reply, c)
+		select {
+		case <-time.NewTimer(20 * time.Millisecond).C:
+			rf.mu.Lock()
+			if rf.State == LEADER || rf.CurrentTerm == args.Term {
+				rf.Logf("failed to receive appendEntries response from %d", idx)
+			}
+			rf.mu.Unlock()
+		case <-c:
+			rf.ReceiveInstallSnapshotResponse(idx, &args, &reply)
+			randomTime := 20 * time.Millisecond
+			time.Sleep(randomTime)
+		}
+	} else {
+		args := AppendEntriesArgs{
+			Term:         rf.CurrentTerm,
+			LeaderId:     rf.me,
+			LeaderCommit: rf.CommitIndex,
+			PrevLogIndex: rf.NextIndex[idx] - 1,
+			PrevLogTerm:  rf.LogTermAt(rf.NextIndex[idx] - 1),
+		}
+		if rf.Cursor >= rf.NextIndex[idx] {
+			args.Entries = append(args.Entries, rf.LogRange0(rf.NextIndex[idx])...)
+		}
+		rf.mu.Unlock()
+		var reply AppendEntriesReply
+		c := make(chan struct{}, 1)
+		go rf.AsyncAppendEntries(idx, &args, &reply, c)
+		select {
+		case <-time.NewTimer(50 * time.Millisecond).C:
+			rf.mu.Lock()
+			if rf.State == LEADER || rf.CurrentTerm == args.Term {
+				rf.Logf("failed to receive appendEntries response from %d", idx)
+			}
+			rf.mu.Unlock()
+		case <-c:
+			rf.ReceiveAppendResponse(idx, &args, &reply)
+		}
+	}
+	return true
+}
+
 func (rf *Raft) SendHeartBeatsToPeer(idx int) {
-	for !rf.killed() {
-		rf.mu.Lock()
-		if rf.State != LEADER {
-			rf.mu.Unlock()
-			break
-		}
-		if rf.NextIndex[idx] < rf.CompactedLen {
-			args := InstallSnapshotArgs{
-				Term:             rf.CurrentTerm,
-				LeaderId:         rf.me,
-				LastIncludeIndex: rf.IncludeIndex,
-				LastIncludeTerm:  rf.IncludeTerm,
-				Data:             rf.SnapshotData,
-			}
-			rf.mu.Unlock()
-			var reply InstallSnapshotReply
-			c := make(chan struct{}, 1)
-			go rf.AsyncInstallSnapshot(idx, &args, &reply, c)
-			select {
-			case <-time.NewTimer(20 * time.Millisecond).C:
-				rf.mu.Lock()
-				if rf.State == LEADER || rf.CurrentTerm == args.Term {
-					rf.Logf("failed to receive appendEntries response from %d", idx)
-				}
-				rf.mu.Unlock()
-			case <-c:
-				rf.ReceiveInstallSnapshotResponse(idx, &args, &reply)
-				randomTime := 20 * time.Millisecond
-				time.Sleep(randomTime)
-			}
-		} else {
-			args := AppendEntriesArgs{
-				Term:         rf.CurrentTerm,
-				LeaderId:     rf.me,
-				LeaderCommit: rf.CommitIndex,
-				PrevLogIndex: rf.NextIndex[idx] - 1,
-				PrevLogTerm:  rf.LogTermAt(rf.NextIndex[idx] - 1),
-			}
-			if rf.Cursor >= rf.NextIndex[idx] {
-				args.Entries = append(args.Entries, rf.LogRange0(rf.NextIndex[idx])...)
-			}
-			rf.mu.Unlock()
-			var reply AppendEntriesReply
-			c := make(chan struct{}, 1)
-			go rf.AsyncAppendEntries(idx, &args, &reply, c)
-			select {
-			case <-time.NewTimer(50 * time.Millisecond).C:
-				rf.mu.Lock()
-				if rf.State == LEADER || rf.CurrentTerm == args.Term {
-					rf.Logf("failed to receive appendEntries response from %d", idx)
-				}
-				rf.mu.Unlock()
-			case <-c:
-				rf.ReceiveAppendResponse(idx, &args, &reply)
-				randomTime := 20 * time.Millisecond
-				time.Sleep(randomTime)
-			}
-		}
+	for !rf.killed() && rf.sync(idx) {
+		randomTime := 50 * time.Millisecond
+		time.Sleep(randomTime)
 	}
 }
 
