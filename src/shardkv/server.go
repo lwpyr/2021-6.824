@@ -4,6 +4,8 @@ package shardkv
 import (
 	"6.824/labrpc"
 	"6.824/shardctrler"
+	"bytes"
+	"fmt"
 )
 import "6.824/raft"
 import "sync"
@@ -26,18 +28,78 @@ type ShardKV struct {
 	gid          int
 	ctrlers      []*labrpc.ClientEnd
 	maxraftstate int // snapshot if log grows this big
+	persister 	 *raft.Persister
 
-	// Your definitions here.
-	sm       	 *shardctrler.Clerk
-	ctrlConfig   shardctrler.Config
+	// clerks
+	smc *shardctrler.Clerk
+	kvc *Clerk
+
+	// persistence
+	kv [shardctrler.NShards]map[string]string
+	clients map[int]int32
+
+	ctrlConfig   	*shardctrler.Config
+	ctrlConfigNew   *shardctrler.Config
+	// todo migrate state
 }
 
+func (kv *ShardKV) Logf(format string, a ...interface{}) {
+	prefix := fmt.Sprintf("[%d]MGR_CLIENT: ", kv.me)
+	_, _ = DPrintf(prefix+format, a...)
+}
+
+type SKVServerSnapshot struct {
+	Kv      [shardctrler.NShards]map[string]string `json:"kv"`
+	Clients map[int]int32     					   `json:"clients"`
+
+	Stable          bool
+	CtrlConfig   	shardctrler.Config
+	CtrlConfigNew   shardctrler.Config
+}
+
+func (kv *ShardKV) CheckPersist(appliedIndex int) {
+	if kv.persister.RaftStateSize() >= kv.maxraftstate {
+		w := new(bytes.Buffer)
+		e := labgob.NewEncoder(w)
+		snapshot := SKVServerSnapshot{
+			Kv:     kv.kv,
+			Clients: kv.clients,
+			// todo
+		}
+		err := e.Encode(snapshot)
+		if err != nil {
+			return
+		}
+		b := w.Bytes()
+		kv.rf.Snapshot(appliedIndex, b)
+	}
+}
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 }
 
+func (kv *ShardKV) GetFinal(args *GetArgs, reply *GetReply) {
+	// Your code here.
+}
+
+func (kv *ShardKV) get(args *GetArgs, reply *GetReply, redirect bool) {
+	// Your code here.
+}
+
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	// Your code here.
+}
+
+func (kv *ShardKV) PutAppendFinal(args *PutAppendArgs, reply *PutAppendReply) {
+	// Your code here.
+}
+
+func (kv *ShardKV) putAppend(args *PutAppendArgs, reply *PutAppendReply, redirect bool) {
+	// Your code here.
+}
+
+func (kv *ShardKV) Migrate(args *MigrateArgs, reply *MigrateReply) {
 	// Your code here.
 }
 
@@ -52,8 +114,7 @@ func (kv *ShardKV) Kill() {
 	// Your code here, if desired.
 }
 
-
-//
+// StartServer
 // servers[] contains the ports of the servers in this group.
 //
 // me is the index of the current server in servers[].
@@ -92,6 +153,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.make_end = make_end
 	kv.gid = gid
 	kv.ctrlers = ctrlers
+	kv.persister = persister
 
 	// Your initialization code here.
 
@@ -100,7 +162,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.sm = shardctrler.MakeClerk(ctrlers)
+	kv.smc = shardctrler.MakeClerk(ctrlers)
+	kv.kvc = MakeClerk(servers, make_end)
 
 	return kv
 }

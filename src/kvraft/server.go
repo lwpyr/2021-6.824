@@ -6,21 +6,11 @@ import (
 	"6.824/raft"
 	"bytes"
 	"fmt"
-	"log"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 )
-
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -34,32 +24,10 @@ type KVServer struct {
 	// Your definitions here.
 	kv map[string]string
 	clients map[int]int32
-	clientsLock sync.Mutex
 
 	notifier map[int]chan OpRes
 	persister *raft.Persister
 	notifierLock sync.Mutex
-}
-
-func (kv *KVServer) SetClients(k int, v int32) {
-	kv.clientsLock.Lock()
-	defer kv.clientsLock.Unlock()
-
-	kv.clients[k] = v
-}
-
-func (kv *KVServer) CheckClients(k int) (v int32, ok bool) {
-	kv.clientsLock.Lock()
-	defer kv.clientsLock.Unlock()
-	v, ok = kv.clients[k]
-	return
-}
-
-func (kv *KVServer) DeleteClients(k int) {
-	kv.clientsLock.Lock()
-	defer kv.clientsLock.Unlock()
-
-	delete(kv.clients, k)
 }
 
 func (kv *KVServer) SetNotifier(t int, c chan OpRes) {
@@ -163,18 +131,18 @@ type KVServerSnapshot struct {
 }
 
 func (kv *KVServer) CheckPersist(appliedIndex int) {
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	snapshot := KVServerSnapshot{
-		Kv:     kv.kv,
-		Clients: kv.clients,
-	}
-	err := e.Encode(snapshot)
-	if err != nil {
-		return
-	}
-	b := w.Bytes()
 	if kv.persister.RaftStateSize() >= kv.maxraftstate {
+		w := new(bytes.Buffer)
+		e := labgob.NewEncoder(w)
+		snapshot := KVServerSnapshot{
+			Kv:     kv.kv,
+			Clients: kv.clients,
+		}
+		err := e.Encode(snapshot)
+		if err != nil {
+			return
+		}
+		b := w.Bytes()
 		kv.rf.Snapshot(appliedIndex, b)
 	}
 }
@@ -228,20 +196,9 @@ func (kv *KVServer) ApplyCron() {
 	}
 }
 
-//
-// the tester calls Kill() when a KVServer instance won't
-// be needed again. for your convenience, we supply
-// code to set rf.dead (without needing a lock),
-// and a killed() method to test rf.dead in
-// long-running loops. you can also add your own
-// code to Kill(). you're not required to do anything
-// about this, but it may be convenient (for example)
-// to suppress debug output from a Kill()ed instance.
-//
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
-	// Your code here, if desired.
 }
 
 func (kv *KVServer) killed() bool {

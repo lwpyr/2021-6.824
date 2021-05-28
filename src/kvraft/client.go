@@ -3,7 +3,6 @@ package kvraft
 import (
 	"6.824/labrpc"
 	"fmt"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,10 +21,8 @@ func (ck* Clerk) NextSerID() int32 {
 }
 
 func (ck *Clerk) Logf(format string, a ...interface{}) {
-	if Debug {
-		prefix := fmt.Sprintf("[%d]CLIENT: ", ck.ID)
-		log.Printf(prefix+format, a...)
-	}
+	prefix := fmt.Sprintf("[%d]CLIENT: ", ck.ID)
+	_, _ = DPrintf(prefix+format, a...)
 }
 
 var GlobalId = 0

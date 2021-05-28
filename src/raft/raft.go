@@ -75,6 +75,7 @@ type RFLog struct {
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
+	peersMu   []sync.Mutex
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
@@ -582,6 +583,8 @@ func (rf *Raft) syncAll() {
 }
 
 func (rf *Raft) sync(idx int) bool {
+	rf.peersMu[idx].Lock()
+	defer rf.peersMu[idx].Unlock()
 	rf.mu.Lock()
 	if rf.State != LEADER {
 		rf.mu.Unlock()
@@ -775,6 +778,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
+	rf.peersMu = make([]sync.Mutex, len(peers))
 	rf.persister = persister
 	rf.me = me
 

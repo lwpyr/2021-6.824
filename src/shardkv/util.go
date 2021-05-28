@@ -2,7 +2,6 @@ package shardkv
 
 import "log"
 
-// Debugging
 const Debug = true
 
 func init(){
